@@ -1,0 +1,7 @@
+pyproject.toml
+pyredis/pyredis.egg-info/PKG-INFO
+pyredis/pyredis.egg-info/SOURCES.txt
+pyredis/pyredis.egg-info/dependency_links.txt
+pyredis/pyredis.egg-info/top_level.txt
+tests/test_protocol.py
+tests/test_types.py

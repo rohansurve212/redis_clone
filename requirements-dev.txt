@@ -1,0 +1,6 @@
+-r requirements.txt
+pyredis
+pytest
+black
+flake8
+mypy
