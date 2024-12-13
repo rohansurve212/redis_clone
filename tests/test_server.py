@@ -2,6 +2,8 @@ import pytest
 from pyredis.protocol import Array, BulkString, SimpleString, Error
 from pyredis.server import process_command
 
+STORE: dict = {}
+
 def test_command():
     frame = Array([BulkString("COMMAND")])
     response = process_command(frame)
@@ -56,3 +58,14 @@ def test_invalid_frame_type():
     frame = SimpleString("Invalid")
     response = process_command(frame)
     assert response == b"-Invalid frame type\r\n"
+
+def test_set_command():
+    frame = Array([BulkString("SET"), BulkString("key"), BulkString("value")])
+    response = process_command(frame)
+    assert response == b"+OK\r\n"
+
+def test_get_command():
+    STORE["key"] = "value"
+    frame = Array([BulkString("GET"), BulkString("key")])
+    response = process_command(frame)
+    assert response == b"$5\r\nvalue\r\n"

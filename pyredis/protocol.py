@@ -53,12 +53,15 @@ def parse_frame(buffer):
 
     match chr(buffer[0]):
         case '+':
+            # SimpleString
             return SimpleString(data=buffer[1:end].decode('ascii')), end + 2
 
         case '-':
+            # Error
             return Error(message=buffer[1:end].decode('ascii')), end + 2
 
         case '$':
+            # BulkString
             expected_length = int(buffer[1:end].decode('ascii'))
             size = end + expected_length + 2 + 2
 
@@ -67,9 +70,11 @@ def parse_frame(buffer):
                 return BulkString(data=message), size
 
         case ':':
+            # Integer
             return Integer(data=int(buffer[1:end].decode('ascii'))), end + 2
         
         case '*':
+            # Array
             num_elements = int(buffer[1:end].decode('ascii'))
             if num_elements == -1: # Null array
                 return Array(elements=None), end + 2
