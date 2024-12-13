@@ -258,6 +258,21 @@ async def async_process_command(frame, STORE, STORE_LOCK):
                     STORE[key] = ("-1", None)
                     return SimpleString(f"(integer) -1").encode()
 
+        elif command == "DEL":
+            # Handle DEL command
+            if len(frame.elements) < 2:
+                return Error("DEL requires at least one key").encode()
+            
+            keys = [element.data for element in frame.elements[1:]]
+            delete_count = 0
+            async with STORE_LOCK: # Acquire asyncio lock
+                for key in keys:
+                    if key in STORE:
+                        del STORE[key]
+                        delete_count += 1
+            
+            return SimpleString(f"(integer) {delete_count}").encode()
+
         else:
             return Error("Invalid command").encode()
 
