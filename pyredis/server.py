@@ -1,17 +1,18 @@
 import asyncio, time, random
 from functools import partial
 from pyredis.protocol import parse_frame, Array, Error, SimpleString, BulkString, Integer
+from pyredis.utils import log_to_aof
 
 HOST = "0.0.0.0"
 PORT = 7
 CONCURRENCY_METHOD = "ASYNCIO"
 
 # Setup server to listen for connections
-async def start_server_using_asyncio(STORE, STORE_LOCK):
+async def start_server_using_asyncio(STORE, STORE_LOCK, AOF_FILE):
     """
         Start the asyncio server
     """
-    server = await asyncio.start_server(partial(handle_client_using_asyncio, STORE, STORE_LOCK), HOST, PORT)
+    server = await asyncio.start_server(partial(handle_client_using_asyncio, STORE, STORE_LOCK, AOF_FILE), HOST, PORT)
     addr = server.sockets[0].getsockname()
     print(f"Server listening on {addr}")
     
@@ -19,7 +20,7 @@ async def start_server_using_asyncio(STORE, STORE_LOCK):
         await server.serve_forever()
 
 # Handle client connections
-async def handle_client_using_asyncio(STORE, STORE_LOCK, reader, writer):
+async def handle_client_using_asyncio(STORE, STORE_LOCK, AOF_FILE, reader, writer):
     """Handle a single client connection."""
     addr = writer.get_extra_info('peername')
     buffer = b""
@@ -45,7 +46,7 @@ async def handle_client_using_asyncio(STORE, STORE_LOCK, reader, writer):
                 buffer = buffer[consumed:]  # Remove processed data
 
                 # Handle the command
-                response = await async_process_command(frame, STORE, STORE_LOCK)
+                response = await async_process_command(frame, STORE, STORE_LOCK, AOF_FILE)
                 print(f"Sending response: {response}")
                 writer.write(response)
                 await writer.drain()  # Ensure the response is sent
@@ -58,7 +59,7 @@ async def handle_client_using_asyncio(STORE, STORE_LOCK, reader, writer):
         await writer.wait_closed()
 
 # Handle the command
-async def async_process_command(frame, STORE, STORE_LOCK):
+async def async_process_command(frame, STORE, STORE_LOCK, AOF_FILE):
     if isinstance(frame, Array):
         if not frame.elements:
             return Error("Empty command").encode()
@@ -106,6 +107,10 @@ async def async_process_command(frame, STORE, STORE_LOCK):
             async with STORE_LOCK: # Acquire asyncio Lock
                 STORE[key] = (value, expiry_time) # Store the key-value pair, overwrite value if key already exists
             
+            # Log the command to the AOF file
+            aof_command = f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n".encode()
+            await log_to_aof(aof_command, AOF_FILE)
+            
             return SimpleString("OK").encode()
         
         elif command == "GET":
@@ -140,7 +145,7 @@ async def async_process_command(frame, STORE, STORE_LOCK):
             async with STORE_LOCK: # Acquire asyncio Lock
                 if key in STORE:
                     if isinstance(STORE[key], list):
-                        STORE[key] = values + STORE[key] # Prepend values to the list
+                        STORE[key] = reversed(values) + STORE[key] # Prepend values to the list
                     else:
                         return Error("WRONGTYPE: Operation against a key holding the wrong kind of value").encode()
                 else:
@@ -148,6 +153,10 @@ async def async_process_command(frame, STORE, STORE_LOCK):
                 
                 # Get the length of the list
                 len_entry = str(len(STORE[key]))
+            
+            # Log the command to the AOF file
+            aof_command = f"*3\r\n$5\r\nLPUSH\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
+            await log_to_aof(aof_command)
             
             return SimpleString(f"(integer) {len_entry}").encode()
 
@@ -171,6 +180,10 @@ async def async_process_command(frame, STORE, STORE_LOCK):
                 # Get the length of the list
                 len_entry = str(len(STORE[key]))
             
+            # Log the command to the AOF file
+            aof_command = f"*3\r\n$5\r\nRPUSH\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
+            await log_to_aof(aof_command)
+
             return SimpleString(f"(integer) {len_entry}").encode()
         
         elif command == "LRANGE":
@@ -233,15 +246,25 @@ async def async_process_command(frame, STORE, STORE_LOCK):
                     if isinstance(STORE[key], tuple) and STORE.get(key)[0].lstrip('-+').isdigit():
                         value, expiry_time = STORE.get(key)
                         STORE[key] = (str(int(value) + 1), expiry_time)
+                        
+                        # Log the command to the AOF file
+                        aof_command = f"*2\r\n$4\r\nINCR\r\n${len(key)}\r\n{key}\r\n"
+                        await log_to_aof(aof_command)
+                        
                         return SimpleString(f"(integer) {int(value) + 1}").encode()
                     else:
                         return Error("Value is not an integer or out of range").encode()
                 else:
                     STORE[key] = ("1", None)
+                    
+                    # Log the command to the AOF file
+                    aof_command = f"*2\r\n$4\r\nINCR\r\n${len(key)}\r\n{key}\r\n"
+                    await log_to_aof(aof_command)
+                    
                     return SimpleString(f"(integer) 1").encode()
 
         elif command == "DECR":
-            # Handle INCR command
+            # Handle DECR command
             if len(frame.elements) != 2:
                 return Error("ERR wrong number of arguments for command").encode()
             
@@ -251,11 +274,21 @@ async def async_process_command(frame, STORE, STORE_LOCK):
                     if isinstance(STORE[key], tuple) and STORE.get(key)[0].lstrip('-+').isdigit():
                         value, expiry_time = STORE.get(key)
                         STORE[key] = (str(int(value) - 1), expiry_time)
+                        
+                        # Log the command to the AOF file
+                        aof_command = f"*2\r\n$4\r\nDECR\r\n${len(key)}\r\n{key}\r\n"
+                        await log_to_aof(aof_command)
+
                         return SimpleString(f"(integer) {int(value) - 1}").encode()
                     else:
                         return Error("Value is not an integer or out of range").encode()
                 else:
                     STORE[key] = ("-1", None)
+                    
+                    # Log the command to the AOF file
+                    aof_command = f"*2\r\n$4\r\nDECR\r\n${len(key)}\r\n{key}\r\n"
+                    await log_to_aof(aof_command)
+                    
                     return SimpleString(f"(integer) -1").encode()
 
         elif command == "DEL":
@@ -270,6 +303,10 @@ async def async_process_command(frame, STORE, STORE_LOCK):
                     if key in STORE:
                         del STORE[key]
                         delete_count += 1
+                        
+            # Log the command to the AOF file
+            aof_command = f"*2\r\n$3\r\nDEL\r\n${len(key)}\r\n{key}\r\n"
+            await log_to_aof(aof_command)
             
             return SimpleString(f"(integer) {delete_count}").encode()
 
@@ -313,16 +350,45 @@ async def expiry_scheduler(STORE, STORE_LOCK):
         # Step 4: Wait 100ms before next check
         await asyncio.sleep(0.1)
 
+async def replay_aof(STORE, STORE_LOCK, AOF_FILE):
+    """Replay commands from the AOF file to rebuild the dataset."""
+    try:
+        # Read the entire AOF file as a single string
+        async with asyncio.Lock():
+            with open(AOF_FILE, "rb") as file: # Open in binary mode to handle RESP format
+                content = file.read()
+
+        # Debugging: Print the raw content
+        print(f"Replaying AOF content: {content}")
+        
+        # Process commands in the AOF file
+        buffer = content
+        while buffer:
+            # Parse the RESP command from the file and execute it
+            frame, consumed = parse_frame(buffer)
+            if frame:
+                await async_process_command(frame, STORE, STORE_LOCK, AOF_FILE)
+                buffer = buffer[consumed:] # Remove processed command
+            else:
+                break # Exit if no more commands can be parsed
+    except FileNotFoundError:
+        print(f"AOF file {AOF_FILE} not found. Starting with an empty dataset.")
+
 
 if __name__ == "__main__":
     try:
         print("Using Asyncio")
         STORE: dict = {}
         STORE_LOCK = asyncio.Lock()
+        AOF_FILE = "C:/Users/rohan/Documents/Projects/SoftwareProjects/PythonProjects/codingChallenges/redis_server/pyredis/appendonly.aof"
         
         async def gather_all_async_tasks():
+            # Replay the AOF file to restore the dataset
+            await replay_aof(STORE, STORE_LOCK, AOF_FILE)
+            
+            # Start the server and expiry scheduler
             await asyncio.gather(
-            start_server_using_asyncio(STORE, STORE_LOCK),
+            start_server_using_asyncio(STORE, STORE_LOCK, AOF_FILE),
             expiry_scheduler(STORE, STORE_LOCK)
         )
         asyncio.run(gather_all_async_tasks())
